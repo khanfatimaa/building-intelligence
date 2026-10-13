@@ -52,3 +52,39 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: applica
 ```
 
 Expect HTTP 404 with an OpenAI-style error envelope: `error.code` is `model_not_found`.
+
+## Story 2.3 — Semantic Retrieval
+
+Adds the `semantic` mode: `/v1/query` embeds the question and returns matching source passages in `results` (no generated answer).
+
+Needs the Story 2.2 data and an untracked `.env` with `MONGODB_URI` and `VOYAGE_API_KEY`. Start the API: `uv run uvicorn building_with_rag.main:app --port 8000`. A free Voyage key is rate limited, so wait about 20 seconds between commands that call it.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "semantic", "limit": 3}'
+```
+
+Expect HTTP 200, `"status": "ok"`, `"pattern": "semantic"`, and at most 3 `results` ordered by `score` (highest first), each with `chunk_id`, an act-qualified `section_id`, `act`, `text`, `heading`, `score` and `source`. `trace` shows the query and filters. Scores are rankings, not proof of correctness.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "semantic", "limit": 3, "filters": {"act": ["BNS_2023"]}}'
+```
+
+Expect HTTP 200, `"status": "ok"`, and every result has `"act": "BNS_2023"`.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "semantic", "filters": {"access_level": ["restricted"]}}'
+```
+
+Expect HTTP 200, `"status": "no_results"` and empty `results` (the filter leaves nothing in scope; this is not a service error).
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is theft?", "pattern": "semantic", "filters": {"$where": ["x"]}}'
+```
+
+Expect HTTP 422 with a `detail` list (unknown filter fields are rejected). If the database or `VOYAGE_API_KEY` is not configured, a valid request returns HTTP 503 with `"status": "unavailable"` and `trace.reason`.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "rag-semantic", "stream": false, "messages": [{"role": "user", "content": "What is the punishment for murder?"}]}'
+```
+
+Expect the same placeholder reply as Story 1.1: chat does no retrieval until answer generation exists.
