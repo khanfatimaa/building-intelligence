@@ -73,10 +73,37 @@ Story 2.2 loads the section records into one Atlas database (`MONGODB_DB_NAME`; 
 - **Embedding decision:** Voyage `voyage-3.5`, version `voyage-3.5`, 1,024 dimensions, `input_type` `document` for chunks and `query` for questions. `access_level` is `public` on every classroom record; the field is kept for later compatibility, with no access control built.
 - **Vector index:** `embeddings_vector_index`, Atlas type `vectorSearch`, on `embeddings.vector` (1,024 dimensions, `cosine`), with `filter` fields `act`, `chapter`, `status`, `access_level`.
 - **Capability check:** the command proves index management works with `list_search_indexes` and prints "Atlas Search index management available; vectorSearch index type used". On a non-Atlas deployment or without the privilege it stops and reports the missing prerequisite.
-- **Retrieval path (built in a later story):** `$vectorSearch` on `embeddings`, resolve each `chunk_id` to `chunks`, then `section_id` to `sections`, then build a `RetrievedChunk`. Section number and source filters apply after that resolution.
+- **Retrieval path:** see "Semantic retrieval" below. Section number and source filters are not index filters.
 - **Command** (run by the person running the course, with an untracked `.env`): `uv run python -m building_with_rag.ingestion.load`. Options: `--accept-changes` replaces changed documents and deletes stale chunks and embeddings; `--test-db` uses the test database. Embeds in batches of 8 with a 20-second delay and rate-limit retries. The first run takes about 40 minutes on a free Voyage key; it is resumable, and a re-run with everything present makes no Voyage calls.
 - **Re-runs:** unchanged documents are reused. If section text, chunking, or embedding settings changed, the command prints new/reused/changed/stale counts and stops until `--accept-changes` is given, so old and new data are never mixed silently.
 - **Limitations:** an existing index named `embeddings_vector_index` with a different definition is reported and left alone, never deleted. Sections flagged `needs_review` in Story 2.1 are loaded as they are, and sections Story 2.1 left out are absent. A new index or document can take a short time to become searchable. An M0 cluster allows only a few Atlas Search indexes, so the test database index is for a brief trial.
+
+## Semantic retrieval
+
+Story 2.3 builds the `semantic` mode (`rag-semantic`) in `src/building_with_rag/retrieval/semantic.py`. It returns source passages in `QueryResult.results` only. Answer generation and Open WebUI answer text come later.
+
+**Flow** (`run_pattern` calls it for `semantic` requests with `generate_answer=false`, so `/v1/query` is the diagnostic owner):
+
+1. Validate: the question is trimmed and must be 1 to 4,000 characters; `limit` is 1 to 20 (default 5).
+2. Readiness check, counts and metadata only: both acts in `sections`, `chunks` and `embeddings` equal in number, stored model, version and 1,024 dimensions match, and `embeddings_vector_index` is `vectorSearch`, matches the schema definition, and is queryable. A successful check is cached for 60 seconds.
+3. Embed the question with Voyage `voyage-3.5`, 1,024 dimensions, `input_type="query"` (one bounded attempt, no retry loop).
+4. `$vectorSearch` on `embeddings` with a database-side filter built from validated lists, `limit`, and `numCandidates` of `max(limit * 10, 50)` capped at 200 (constants in the module).
+5. Resolve each hit's `chunk_id` to `chunks` and then `section_id` to `sections` (and `sources`), build a `RetrievedChunk`, order by score descending (ties by `chunk_id`), and return at most `limit`. Hits that do not resolve are left out and counted in `trace["unresolved_hits"]`.
+
+**Outcomes:** `ok` (HTTP 200, passages), `no_results` (HTTP 200, empty `results`; the effective scope or search matched nothing), `unavailable` (HTTP 503, empty `results`; not ready, a missing setting such as `VOYAGE_API_KEY`, or a Voyage or MongoDB failure; `trace["reason"]` names it and no secret is shown), and invalid input (HTTP 422).
+
+**Result fields:** `chunk_id`, act-qualified `section_id`, `act`, chunk `text`, `heading` (the section heading, `null` if none), `score`, and `source` (`section_label`, `act_label`, `section_number`, `chapter`, `chapter_title`, `status`, `source_id`, `source_pdf`, `source_sha256`, `page_start`, `page_end`, `needs_review`, `chunk_index`; `null` when absent). `trace` has the selected `query`, `limit`, `num_candidates`, `effective_filters`, model, index, counts, `ignored_fields` and `caller_id`.
+
+**Scope and filters:** one fixed local demo caller (`WEBUI_DEMO_CALLER_ID`) and the `public` access level; no multi-user authorization. `SemanticFilters` accepts only `act`, `status` and `access_level`, each a non-empty list of short plain tokens. Unknown fields, operators and MongoDB-shaped values are rejected. Filters only narrow the public scope, and are part of the `$vectorSearch` stage. An empty scope (for example `access_level=["restricted"]`) is `no_results` without a Voyage or MongoDB search call. `chapter` and `required_acts` are ignored by this mode.
+
+**Caveats:** a score is a similarity ranking, never proof that a passage is correct or answers the question. No score threshold is applied, so an unrelated question still returns its nearest passages. `/v1/chat/completions` keeps its placeholder reply (it sets `generate_answer=true`, which skips retrieval) until answer generation.
+
+**Diagnostic command** (compact output: statuses, ids, scores, lengths; no passage text or vectors):
+
+```
+uv run python -m building_with_rag.retrieval.semantic --check
+uv run python -m building_with_rag.retrieval.semantic "What is the punishment for murder?" --limit 3 --act BNS_2023
+```
 
 ## Out of scope
 

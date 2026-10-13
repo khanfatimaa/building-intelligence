@@ -1,16 +1,23 @@
 """Shared typed contracts. Later stories extend these additively."""
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 Pattern = Literal["semantic", "hybrid", "hybrid-reranked", "structured", "decomposition", "hyde"]
 
 
+# A filter value is a short plain token: no operators, no "$", no MongoDB fragments.
+FilterValue = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.-]{1,64}$")]
+FilterList = Annotated[list[FilterValue], Field(min_length=1, max_length=10)]
+
+
 class SemanticFilters(BaseModel):
-    act: list[str] | None = None
-    status: list[str] | None = None
-    access_level: list[str] | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    act: FilterList | None = None
+    status: FilterList | None = None
+    access_level: FilterList | None = None
 
 
 class QueryRequest(BaseModel):
@@ -22,6 +29,11 @@ class QueryRequest(BaseModel):
     generate_answer: bool = False
     required_acts: list[str] | None = None
     chapter: str | None = None
+
+    @field_validator("question", mode="before")
+    @classmethod
+    def _strip_question(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class RetrievedChunk(BaseModel):
@@ -97,9 +109,9 @@ class RagOptions(BaseModel):
 
     pattern: Pattern | None = None
     filters: SemanticFilters | None = None
-    act: list[str] | None = None
-    status: list[str] | None = None
-    access_level: list[str] | None = None
+    act: FilterList | None = None
+    status: FilterList | None = None
+    access_level: FilterList | None = None
     limit: int | None = Field(default=None, ge=1, le=20)
     required_acts: list[str] | None = None
     chapter: str | None = None

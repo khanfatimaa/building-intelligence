@@ -46,8 +46,11 @@ def healthz() -> dict[str, str]:
 
 
 @app.post("/v1/query", response_model=QueryResult)
-def query(request: QueryRequest) -> QueryResult:
-    return run_pattern(request)
+def query(request: QueryRequest):
+    result = run_pattern(request)
+    if result.status == "unavailable":
+        return JSONResponse(status_code=503, content=result.model_dump())
+    return result
 
 
 @app.get("/v1/models", response_model=ModelList)
