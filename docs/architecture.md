@@ -58,7 +58,25 @@ Story 2.1 turns the two supplied PDFs into section-level JSONL records. One reco
   - No page had unusable text, so there is no OCR; pages that do are reported and their sections flagged.
   - The command's "missing section numbers" check compares against 358 (BNS) and 511 (IPC), a sanity check that is never written to a record.
 
-**Chunking later.** Story 2.2 chunks each section's `text`. Every chunk carries its parent `section_id`, `act`, `status`, `chapter`, `heading`, `source_pdf`, and `source_sha256`, copied from the section record. A chunk is a piece of one section and is never merged across sections or acts. The section record stays the source of truth.
+**Chunking.** Story 2.2 chunks each section's `text`. A chunk is a piece of one section and is never merged across sections or acts. `heading`, `source_pdf`, and `source_sha256` stay on the `sections` record and are read through the chunk's `section_id`; the section record stays the source of truth.
+
+## MongoDB collections and vector index
+
+Story 2.2 loads the section records into one Atlas database (`MONGODB_DB_NAME`; `MONGODB_TEST_DB_NAME` with `--test-db`). Names, IDs, validators, ordinary indexes, and the vector-index definition live in `src/building_with_rag/ingestion/mongodb_schema.py`.
+
+- **Collections** (separate, never merged; each `_id` equals its own ID field):
+  - `sources`: one per PDF (`source_id` such as `source:BNS_2023`, act, label, status, PDF, hash, parser data).
+  - `sections`: one per Story 2.1 record (act-qualified `section_id`, `source_id`, text, provenance, `access_level`).
+  - `chunks`: `chunk_id` (`bns:103#0`), parent `section_id`, `chunk_index`, `chunking_version`, `splitter`, `text`, `embedding_input_text`, `text_sha256`, and denormalized `act`, `chapter`, `status`, `access_level`.
+  - `embeddings`: `embedding_id` (`emb:<chunk_id>:voyage-3.5`), `chunk_id`, model, version, dimensions, `vector`, `input_sha256`, and denormalized `act`, `chapter`, `status`, `access_level`. Vectors are stored only here. Section number and source identifiers are not copied here.
+- **Chunking choice:** about 512 tokens (2,048 characters) with 256 characters of overlap, splitter `building_with_rag.sentence_window` (paragraph, then sentence, then word boundaries), `chunking_version` `chunk-v1`. A section of 2,048 characters or less is one chunk. The supplied corpus gives 939 chunks. `embedding_input_text` is the act label, section number, and heading followed by the chunk text.
+- **Embedding decision:** Voyage `voyage-3.5`, version `voyage-3.5`, 1,024 dimensions, `input_type` `document` for chunks and `query` for questions. `access_level` is `public` on every classroom record; the field is kept for later compatibility, with no access control built.
+- **Vector index:** `embeddings_vector_index`, Atlas type `vectorSearch`, on `embeddings.vector` (1,024 dimensions, `cosine`), with `filter` fields `act`, `chapter`, `status`, `access_level`.
+- **Capability check:** the command proves index management works with `list_search_indexes` and prints "Atlas Search index management available; vectorSearch index type used". On a non-Atlas deployment or without the privilege it stops and reports the missing prerequisite.
+- **Retrieval path (built in a later story):** `$vectorSearch` on `embeddings`, resolve each `chunk_id` to `chunks`, then `section_id` to `sections`, then build a `RetrievedChunk`. Section number and source filters apply after that resolution.
+- **Command** (run by the person running the course, with an untracked `.env`): `uv run python -m building_with_rag.ingestion.load`. Options: `--accept-changes` replaces changed documents and deletes stale chunks and embeddings; `--test-db` uses the test database. Embeds in batches of 8 with a 20-second delay and rate-limit retries. The first run takes about 40 minutes on a free Voyage key; it is resumable, and a re-run with everything present makes no Voyage calls.
+- **Re-runs:** unchanged documents are reused. If section text, chunking, or embedding settings changed, the command prints new/reused/changed/stale counts and stops until `--accept-changes` is given, so old and new data are never mixed silently.
+- **Limitations:** an existing index named `embeddings_vector_index` with a different definition is reported and left alone, never deleted. Sections flagged `needs_review` in Story 2.1 are loaded as they are, and sections Story 2.1 left out are absent. A new index or document can take a short time to become searchable. An M0 cluster allows only a few Atlas Search indexes, so the test database index is for a brief trial.
 
 ## Out of scope
 
