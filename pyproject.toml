@@ -9,6 +9,7 @@ dependencies = [
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
     "pymongo>=4.8",
+    "pypdf>=5",
 ]
 
 [dependency-groups]

@@ -4,6 +4,8 @@
 
 Turn the supplied BNS and IPC PDFs into a small corpus of section-level records that a person can open and read. One record is one section of one act, written as one JSON object per line.
 
+**The implementer writes the extraction script but does not run it.** Do not run the extraction command, and do not create or change `data/processed/*.jsonl`. The person running the course runs the command and does the checks in "Checks to run yourself". The implementer may run only `uv sync`/`uv add`, `uv run ruff check .`, and `uv run pytest`.
+
 This is the only goal. MongoDB, embeddings, vector indexes, retrieval, chunking, and answer generation belong to later stories. Do not start any of them here.
 
 This story follows Story 1.1. It reuses the existing FastAPI application, the existing `data/` folders, and the existing `.env.example`. Do not add or rename settings, and do not change the endpoints, registry, or contracts.
@@ -22,7 +24,7 @@ This story follows Story 1.1. It reuses the existing FastAPI application, the ex
 
 ### 1. Choose a parser
 
-- Pick a PDF text-extraction library that works on these PDFs (for example `pypdf`, `pdfplumber`, or `pymupdf`). Try it on a few pages of each PDF before committing to it.
+- Pick a PDF text-extraction library that works on these PDFs (for example `pypdf`, `pdfplumber`, or `pymupdf`). Choose on suitability for text-based legal PDFs; do not run extraction on the PDFs to compare. If the chosen parser later proves unsuitable, the runner reports it and the parser is swapped.
 - Add it with UV (`uv add <package>`), so `pyproject.toml` and `uv.lock` are updated. Add nothing else unless it is needed.
 - Record the parser name and its installed version. They go into every record as `parser` and `parser_version`.
 
@@ -71,7 +73,7 @@ Every record has exactly these fields so the later classroom importer can read i
 
 Page references (for example first and last page of the section) may be added as extra fields. They do not replace any field above. If a value cannot be found in the PDF or `PROVENANCE.md`, use `null` for it and set `needs_review` to `true`. Do not make one up. `section_id`, `act`, `status`, `section_number`, and `text` must never be null.
 
-### 4. Safe re-runs
+### 4. Safe re-runs (behaviour the script must have)
 
 - Compare each PDF's SHA-256 with the one in `PROVENANCE.md`. If they differ, report it, because the corpus would then come from a file other than the one on record.
 - If an output file already exists, is valid, and every record's `source_sha256` matches the current PDF, leave it untouched. Do not rewrite it.
@@ -84,8 +86,8 @@ Add a short "Document ingestion" section. Keep the existing text. Record:
 
 - the parser chosen, with its version, and why;
 - the output format and file locations, including the field list above;
-- the command to run;
-- the known limitations (scanned or uncertain pages, lettered sections left out, anything else found).
+- the command to run (written for the person who will run it);
+- the known limitations the script is designed around (scanned or uncertain pages, lettered sections left out). Mark them "to be confirmed after the first run", because the implementer has not run the script.
 
 Also explain how later chunking will keep the parent section and source information: every chunk will carry its parent `section_id`, `act`, `status`, `chapter`, `heading`, `source_pdf`, and `source_sha256`, copied from the section record. A chunk is a piece of one section's `text` and is never merged across sections or acts. The section record stays the source of truth.
 
@@ -95,25 +97,36 @@ MongoDB, embeddings, vector or text indexes, chunking itself, retrieval, answer 
 
 ## Completion checks
 
-Keep these small. Run each and record the result.
+### Checks the implementer runs
 
 1. `uv sync` succeeds, and `uv run ruff check .` and `uv run pytest` still pass.
-2. The extraction command runs and writes both files. Each line is valid JSON.
-3. Every record has all the required fields with the exact values and types above, and no `text` is empty. A short script is enough.
-4. Inspect representative records against the PDFs: for each act, at least three sections, including the first section, one in the middle, and one near the end. Include one section that spans pages, if there is one. Confirm the number, heading, chapter, and text match the PDF.
-5. Run the extraction a second time. The files are unchanged, with no duplicate records and the same line counts.
-6. `data/raw/` is unchanged: the PDFs and `PROVENANCE.md` are byte-identical to what was supplied.
+2. The script imports and `uv run python -m building_with_rag.ingest --help` (or equivalent) works without touching the PDFs or `data/processed/`. If that is not possible, skip it and say so.
+3. `data/raw/` is unchanged and `data/processed/` contains only `.gitkeep`.
+
+### Checks to run yourself (after the implementer finishes)
+
+Keep these small.
+
+1. Run `uv run python -m building_with_rag.ingest`. It writes both files and each line is valid JSON.
+2. Confirm every record has all the required fields with the exact values and types above, and no `text` is empty. A short script is enough.
+3. Inspect representative records against the PDFs: for each act, at least three sections, including the first section, one in the middle, and one near the end. Include one section that spans pages, if there is one. Confirm the number, heading, chapter, and text match the PDF.
+4. Run the command a second time. The files are unchanged, with no duplicate records and the same line counts.
+5. Check that the PDFs and `PROVENANCE.md` are unchanged.
 
 ## Handover
 
-When finished, fill in this record:
+**The implementer fills in:**
+
+- **Files created or changed:** list each one, including `pyproject.toml`, `uv.lock`, and `docs/architecture.md`.
+- **Commands actually run:** each command with its result. Do not list commands that were not run. State plainly that the extraction was not run.
+- **Command for you to run:** the exact extraction command and where the output will appear.
+- **Deviations and open issues:** anything that differs from this story.
+
+**You fill in after running the script:**
 
 - **Inputs:** the files read, with the SHA-256 found and whether it matched `PROVENANCE.md`.
 - **Output:** the two files written, with record counts and how many have `needs_review` true.
-- **Files created or changed:** list each one, including `pyproject.toml`, `uv.lock`, and `docs/architecture.md`.
-- **Commands actually run:** each command with its result. Do not list commands that were not run.
 - **Records inspected:** which sections were compared with the PDF and what was found.
-- **Known limitations:** unparsed pages, omitted lettered sections, flagged records, and anything uncertain.
-- **Deviations and open issues:** anything that differs from this story.
+- **Known limitations:** unparsed pages, omitted lettered sections, flagged records, and anything uncertain. Update `docs/architecture.md` to match.
 
 Story 2.2 will chunk these section records, embed them, and load them into MongoDB.
