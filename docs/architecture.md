@@ -202,6 +202,33 @@ uv run python -m building_with_rag.retrieval.hybrid "What is culpable homicide?"
 
 **Limitations:** fused scores are rankings, not proof of correctness; equal weights and `RRF_K` are judgments, not tuned; a chunk found by one route can still rank high; rank fusion ignores how strong a score was; no score threshold, so an unrelated question still returns its nearest passages. The keyword route searches `chunks.text` only, so a section number and heading (which are only in `embedding_input_text`) are not keyword-searchable; "section 302" matches only chunks whose text contains that number. The `text` operator matches any query term, and `lucene.standard` removes no stop words, so a long natural-language question can pull in weak keyword hits. A new index may take a short time to become queryable, and an M0 cluster allows only a few Atlas Search indexes.
 
+## Hybrid re-ranking
+
+Story 4.2 builds the `hybrid-reranked` mode (`rag-hybrid-reranked`) in `src/building_with_rag/retrieval/rerank.py`. It reuses hybrid retrieval as it is and adds one re-ranking step before context assembly. Everything after retrieval is shared with `semantic` and `hybrid`: `run_pattern_events` dispatches all three the same way, `generate_events` reads `QueryResult.results`, and context assembly, citations, confidence, `/v1/query`, the chat adapter and streaming are unchanged. The mode is chosen only by the model ID, `rag_options.pattern` or `pattern: "hybrid-reranked"`, never automatically.
+
+**Settings** (existing in `.env.example`, names and defaults unchanged): `RERANK_API_BASE_URL` (`https://api.voyageai.com/v1`), `RERANK_API_KEY` (empty), `RERANK_MODEL_NAME` (`rerank-2.5`), `RERANK_REQUEST_TIMEOUT_SECONDS` (`30`), `RERANK_CANDIDATE_LIMIT` (`20`), `RERANK_SEND_LIMIT` (`10`), `RERANK_RETURN_LIMIT` (`5`). The limits must satisfy `1 <= RETURN <= SEND <= CANDIDATE <= 20` (20 is the hybrid retrieval maximum), otherwise the mode is `unavailable` with `invalid_rerank_settings`.
+
+**Pipeline.** (1) Hybrid retrieval returns `RERANK_CANDIDATE_LIMIT` fused candidates, in `fused_rank` order. (2) The first `RERANK_SEND_LIMIT` are sent; the rest are cut (`below_send_limit`). (3) One request scores each sent candidate's `text` against the question; order is by score descending, ties by `fused_rank`. (4) The first **final count = min(request `limit`, `RERANK_RETURN_LIMIT`)** are kept; the rest are cut (`below_return_limit`). (5) The kept passages, in re-rank order, are the only evidence context assembly and the answer generator receive, labelled `E1`..`En` in that order. One question makes at most one re-rank request, with no retry or second pass.
+
+**Provider call.** One `httpx` `POST {RERANK_API_BASE_URL}/rerank` with bearer `RERANK_API_KEY` and body `model`, `query`, `documents`, `top_k` (the number of documents sent). The response `data` entries `{index, relevance_score}` are mapped back by `index`. A missing, duplicate or out-of-range index, a non-numeric score, or a score missing for any sent candidate is a failure; no score is ever invented or filled in. No SDK or framework was added.
+
+**Result fields.** `RetrievedChunk` gains optional `rerank_score` and `rerank_rank` (1..n over the returned chunks). A returned chunk keeps its hybrid fields (position and scores before re-ranking); `score` equals `rerank_score`. Semantic and hybrid results keep both `null`. `omitted_candidates` lists each candidate once with `below_limit` (cut by hybrid's candidate limit), `below_send_limit` or `below_return_limit`. Because that shape holds no scores, `trace["rerank"]` carries `model`, `candidates_taken`, `sent`, `returned`, `omitted` (taken candidates cut after hybrid, so `candidates_taken = returned + omitted`), `below_limit`, the limits and `final_count`, `timeout_seconds`, `before` (sent candidates in fused order with fused rank and score), `after` (the same candidates in re-rank order with rank and score, including those later cut) and `selected` (final evidence ids). No passage text is traced.
+
+**Outcomes.** `ok` (200); `no_results` (200, empty scope or hybrid found nothing, with no re-rank call); `unavailable` (503, empty `results`) for an empty `RERANK_API_KEY`, `RERANK_API_BASE_URL` or `RERANK_MODEL_NAME` (`missing_setting`, message "RERANK_API_KEY is not set", checked before any database, embedding or hybrid call), invalid limits (`invalid_rerank_settings`), a timeout, connection error, non-2xx status or malformed or incomplete response (`rerank_failed`, with `trace["rerank_cause"]` such as `timeout`, `http_500`, `malformed_response`), or hybrid itself being unavailable. **No silent fallback:** the un-re-ranked hybrid list is never returned under `hybrid-reranked`, and the mode never switches to another. No key, URL, request body, raw response or exception text appears in a message, trace or log.
+
+**Command:**
+
+```
+uv run python -m building_with_rag.retrieval.rerank --check
+uv run python -m building_with_rag.retrieval.rerank "What is culpable homicide?" --limit 5
+```
+
+It prints the counts and limits, the before and after tables, the selected evidence and each omitted candidate with its reason, and never passage text or keys.
+
+**Comparison finding:** pending. The lightweight hybrid versus hybrid-reranked comparison on one question (Story 4.2, direct check 6) has not been run; record its observation here once it is.
+
+**Limitations:** re-rank scores are one model's relevance ranking, not proof that a passage answers the question. The re-ranker sees only the sent candidates, so a relevant passage hybrid ranked below `RERANK_SEND_LIMIT` (or below the candidate limit) is never seen. Re-ranking adds one external call, so latency and cost go up and the mode depends on a third service. Passage text is sent to that provider. No score threshold is applied, so an unrelated question still returns its best-ranked passages. There is no caching, and the bounds are untuned defaults. Only chunk `text` is sent; section numbers and headings are not in it, as noted for hybrid.
+
 ## Out of scope
 
 Multi-user authorization, a security programme, an evaluation harness, GraphRAG, agentic RAG, and broad deployment.

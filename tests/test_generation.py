@@ -187,7 +187,7 @@ def test_timeout_is_unavailable(monkeypatch):
 def test_other_modes_keep_the_placeholder_in_chat(monkeypatch):
     monkeypatch.setattr(semantic, "retrieve", never_called)
     monkeypatch.setattr(answer, "generate_events", never_called)
-    body = {"model": "rag-hybrid-reranked", "messages": [{"role": "user", "content": "What is theft?"}]}
+    body = {"model": "rag-structured", "messages": [{"role": "user", "content": "What is theft?"}]}
     text = TestClient(app).post("/v1/chat/completions", json=body).json()["choices"][0]
     assert "not implemented" in text["message"]["content"]
 

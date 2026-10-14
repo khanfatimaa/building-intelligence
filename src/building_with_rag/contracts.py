@@ -51,6 +51,10 @@ class RetrievedChunk(BaseModel):
     keyword_rank: int | None = None
     fused_score: float | None = None
     fused_rank: int | None = None
+    # Hybrid-reranked mode only (Story 4.2); `score` is then the re-rank score and the hybrid
+    # fields above keep the position before re-ranking. Null for other modes.
+    rerank_score: float | None = None
+    rerank_rank: int | None = None
 
 
 class OmittedCandidate(BaseModel):

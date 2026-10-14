@@ -21,13 +21,12 @@ Expect a list of exactly six IDs: `rag-semantic`, `rag-hybrid`, `rag-hybrid-rera
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "semantic"}'
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "hybrid"}'
-curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "hybrid-reranked"}'
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "structured"}'
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "decomposition"}'
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "hyde"}'
 ```
 
-Each returns status 200 with `"status": "not_implemented"`, the matching `pattern`, an honest message ("... mode is not implemented yet. No retrieval was run."), and empty `results`.
+`semantic` and `hybrid` are real since Stories 2.3 and 4.1, and `hybrid-reranked` since Story 4.2 (see their sections). The remaining modes (`structured`, `decomposition`, `hyde`) each return status 200 with `"status": "not_implemented"`, the matching `pattern`, an honest message ("... mode is not implemented yet. No retrieval was run."), and empty `results`.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "", "pattern": "semantic"}'
@@ -170,3 +169,27 @@ curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: appl
 ```
 
 Expect HTTP 200 SSE chunks like Story 3.2 (draft label, confidence and sources block, a `stop` chunk), ending with `data: [DONE]`.
+
+## Story 4.2 — Hybrid Re-ranking
+
+Adds the `hybrid-reranked` mode: hybrid candidates re-ordered by one re-ranking model before the answer, through the same `/v1/query` and chat path as `hybrid`.
+
+Needs the Story 4.1 setup and `RERANK_API_KEY` set in `.env`. Start the API: `uv run uvicorn building_with_rag.main:app --port 8000`. If `CAPSTONE_API_KEY` is set, add `-H "Authorization: Bearer <your CAPSTONE_API_KEY>"` to the chat command.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "culpable homicide not amounting to murder", "pattern": "hybrid-reranked", "limit": 5}'
+```
+
+Expect HTTP 200, `"status": "ok"`, `"pattern": "hybrid-reranked"`, and `results` ordered by `rerank_rank` with `score` equal to `rerank_score` and the hybrid `fused_rank` kept. `omitted_candidates` lists cut candidates with an `omitted_reason`, and `trace.rerank` shows `before`, `after` and `selected`.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "culpable homicide", "pattern": "hybrid-reranked", "filters": {"access_level": ["restricted"]}}'
+```
+
+Expect HTTP 200, `"status": "no_results"` and empty `results`, with no re-rank call. With `RERANK_API_KEY` blank, a normal question returns HTTP 503, `"status": "unavailable"`, `trace.reason` `missing_setting` and empty `results`; hybrid results are never returned in its place.
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "rag-hybrid-reranked", "stream": true, "messages": [{"role": "user", "content": "What is culpable homicide not amounting to murder?"}]}'
+```
+
+Expect HTTP 200 SSE chunks like Story 3.2 (draft label, confidence and sources block, a `stop` chunk) citing only the final selected passages, ending with `data: [DONE]`.
