@@ -44,6 +44,13 @@ class RetrievedChunk(BaseModel):
     heading: str | None = None
     score: float | None = None
     source: dict[str, Any] | None = None
+    # Hybrid mode only (Story 4.1); `score` is then the fused score. Null for other modes.
+    semantic_score: float | None = None
+    semantic_rank: int | None = None
+    keyword_score: float | None = None
+    keyword_rank: int | None = None
+    fused_score: float | None = None
+    fused_rank: int | None = None
 
 
 class OmittedCandidate(BaseModel):

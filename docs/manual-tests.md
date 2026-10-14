@@ -146,3 +146,27 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: applica
 ```
 
 Expect normal Chat Completions JSON whose content says the retrieved passages do not give enough evidence (no draft, no sources, no confidence).
+
+## Story 4.1 — Hybrid Search
+
+Adds the `hybrid` mode: a semantic and a keyword route over the chunk text, fused by reciprocal rank fusion, through the same `/v1/query` and chat path as `semantic`.
+
+Needs the Story 3.2 setup plus the keyword index: run `uv run python -m building_with_rag.ingestion.keyword_index` once. Start the API: `uv run uvicorn building_with_rag.main:app --port 8000`. Wait about 20 seconds between commands that call Voyage. If `CAPSTONE_API_KEY` is set, add `-H "Authorization: Bearer <your CAPSTONE_API_KEY>"` to the chat command.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "culpable homicide not amounting to murder", "pattern": "hybrid", "limit": 5}'
+```
+
+Expect HTTP 200, `"status": "ok"`, `"pattern": "hybrid"`, and `results` ordered by `fused_rank`, each with `score` equal to `fused_score` and `semantic_*` / `keyword_*` ranks and scores (`null` for a route that did not return the passage). `trace` shows `route_overlap`, `semantic_only`, `keyword_only` and the `fusion` rule.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "culpable homicide", "pattern": "hybrid", "filters": {"access_level": ["restricted"]}}'
+```
+
+Expect HTTP 200, `"status": "no_results"` and empty `results`. If the keyword index is missing or not queryable, a valid request returns HTTP 503 with `"status": "unavailable"` and a `trace.reason` such as `keyword_index_missing`.
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "rag-hybrid", "stream": true, "messages": [{"role": "user", "content": "What is culpable homicide not amounting to murder?"}]}'
+```
+
+Expect HTTP 200 SSE chunks like Story 3.2 (draft label, confidence and sources block, a `stop` chunk), ending with `data: [DONE]`.

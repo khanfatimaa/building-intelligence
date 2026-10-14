@@ -231,10 +231,10 @@ def _source(chunk: dict, section: dict, source: dict | None) -> dict[str, Any]:
     }
 
 
-def search(
+def vector_hits(
     db: Database, vector: list[float], scope: dict[str, list[str]], limit: int
-) -> tuple[list[RetrievedChunk], int, int]:
-    """Returns (results, hits returned by the database, unresolved hits)."""
+) -> list[dict[str, Any]]:
+    """Run $vectorSearch with the database-side scope filter; hits carry chunk_id and score."""
     pipeline = [
         {
             "$vectorSearch": {
@@ -249,7 +249,19 @@ def search(
         {"$project": {"chunk_id": 1, "score": {"$meta": "vectorSearchScore"}}},
     ]
     try:
-        hits = list(db[schema.EMBEDDINGS].aggregate(pipeline))
+        return list(db[schema.EMBEDDINGS].aggregate(pipeline))
+    except PyMongoError as exc:
+        raise _mongo_failure(exc) from None
+
+
+def resolve_hits(
+    db: Database, hits: list[dict[str, Any]]
+) -> list[tuple[dict[str, Any], RetrievedChunk | None]]:
+    """Resolve hits (chunk_id, score) through chunks, sections and sources, in the given order.
+
+    A hit that does not resolve is paired with None.
+    """
+    try:
         chunk_ids = [h["chunk_id"] for h in hits]
         chunks = {c["_id"]: c for c in db[schema.CHUNKS].find({"_id": {"$in": chunk_ids}})}
         section_ids = list({c["section_id"] for c in chunks.values()})
@@ -259,26 +271,38 @@ def search(
     except PyMongoError as exc:
         raise _mongo_failure(exc) from None
 
-    results: list[RetrievedChunk] = []
-    unresolved = 0
-    for hit in sorted(hits, key=lambda h: (-h["score"], h["chunk_id"])):
+    resolved: list[tuple[dict[str, Any], RetrievedChunk | None]] = []
+    for hit in hits:
         chunk = chunks.get(hit["chunk_id"])
         section = sections.get(chunk["section_id"]) if chunk else None
         if not chunk or not section:
-            unresolved += 1
+            resolved.append((hit, None))
             continue
-        results.append(
-            RetrievedChunk(
-                chunk_id=chunk["chunk_id"],
-                section_id=section["section_id"],
-                act=section["act"],
-                text=chunk["text"],
-                heading=section.get("heading"),
-                score=float(hit["score"]),
-                source=_source(chunk, section, sources.get(section.get("source_id"))),
+        resolved.append(
+            (
+                hit,
+                RetrievedChunk(
+                    chunk_id=chunk["chunk_id"],
+                    section_id=section["section_id"],
+                    act=section["act"],
+                    text=chunk["text"],
+                    heading=section.get("heading"),
+                    score=float(hit["score"]),
+                    source=_source(chunk, section, sources.get(section.get("source_id"))),
+                ),
             )
         )
-    return results[:limit], len(hits), unresolved
+    return resolved
+
+
+def search(
+    db: Database, vector: list[float], scope: dict[str, list[str]], limit: int
+) -> tuple[list[RetrievedChunk], int, int]:
+    """Returns (results, hits returned by the database, unresolved hits)."""
+    hits = vector_hits(db, vector, scope, limit)
+    ordered = sorted(hits, key=lambda h: (-h["score"], h["chunk_id"]))
+    results = [chunk for _, chunk in resolve_hits(db, ordered) if chunk is not None]
+    return results[:limit], len(hits), len(hits) - len(results)
 
 
 # --- entry point ------------------------------------------------------------------------------

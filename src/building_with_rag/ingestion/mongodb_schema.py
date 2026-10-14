@@ -28,6 +28,12 @@ FILTER_STATUS = "status"
 FILTER_ACCESS_LEVEL = "access_level"
 VECTOR_FILTER_FIELDS = (FILTER_ACT, FILTER_CHAPTER, FILTER_STATUS, FILTER_ACCESS_LEVEL)
 
+# Keyword retrieval (Story 4.1): an Atlas Search `search` index on the plain chunk text.
+KEYWORD_INDEX_NAME = "chunks_text_index"
+KEYWORD_FIELD = "text"
+KEYWORD_ANALYZER = "lucene.standard"
+KEYWORD_FILTER_FIELDS = (FILTER_ACT, FILTER_STATUS, FILTER_ACCESS_LEVEL)
+
 
 def source_id(act: str) -> str:
     return f"source:{act}"
@@ -158,3 +164,35 @@ def vector_index_definition() -> dict[str, Any]:
             *({"type": "filter", "path": path} for path in VECTOR_FILTER_FIELDS),
         ]
     }
+
+
+def keyword_index_definition() -> dict[str, Any]:
+    """The Atlas `search` index definition on `chunks`: static mapping, text plus token filters."""
+    fields: dict[str, Any] = {
+        KEYWORD_FIELD: {"type": "string", "analyzer": KEYWORD_ANALYZER},
+    }
+    for path in KEYWORD_FILTER_FIELDS:
+        fields[path] = {"type": "token"}
+    return {"mappings": {"dynamic": False, "fields": fields}}
+
+
+def keyword_index_matches(index: dict[str, Any]) -> bool:
+    """True when a listed index is the search index defined above.
+
+    Atlas may add defaults when it stores a definition, so each wanted field is checked for its
+    type (and the text analyzer) instead of comparing the whole document.
+    """
+    have = index.get("latestDefinition") or index.get("definition") or {}
+    mappings = have.get("mappings") or {}
+    if index.get("type") != "search" or mappings.get("dynamic") not in (False, None):
+        return False
+    have_fields = mappings.get("fields") or {}
+    for path, wanted in keyword_index_definition()["mappings"]["fields"].items():
+        found = have_fields.get(path)
+        if isinstance(found, list):
+            found = found[0] if found else None
+        if not isinstance(found, dict) or found.get("type") != wanted["type"]:
+            return False
+        if "analyzer" in wanted and found.get("analyzer", KEYWORD_ANALYZER) != wanted["analyzer"]:
+            return False
+    return mappings.get("dynamic") is False

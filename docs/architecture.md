@@ -172,9 +172,35 @@ A validated answer is `outcome="answered"`. A draft that still fails after the l
 
 **Authentication.** When `CAPSTONE_API_KEY` is set, `/v1/chat/completions` requires `Authorization: Bearer <CAPSTONE_API_KEY>` and answers 401 (`invalid_api_key`) before any retrieval or model call. When it is empty chat stays open. `/healthz`, `/v1/models` and `/v1/query` are unchanged. The key is never logged or returned. Whether the trainer's Pipe sends this header is confirmed in Open WebUI, not by the offline tests.
 
-**Using Open WebUI.** Start the API (`uv run uvicorn building_with_rag.main:app --port 8000`), open `http://127.0.0.1:8080`, select **Building with RAG**, choose **semantic** in the RAG-options chip, and ask a question. Watch for the draft label, any retry line, and the closing confidence and sources block. Do not change the bundle, admin panel or Functions. Other modes still reply that they are not implemented.
+**Using Open WebUI.** Start the API (`uv run uvicorn building_with_rag.main:app --port 8000`), open `http://127.0.0.1:8080`, select **Building with RAG**, choose **semantic** in the RAG-options chip, and ask a question. Watch for the draft label, any retry line, and the closing confidence and sources block. Do not change the bundle, admin panel or Functions. Choose **hybrid** for Story 4.1's hybrid mode; the remaining modes still reply that they are not implemented.
 
 **Limitations:** a draft is visible before it is validated and cannot be retracted; the lexical support check can be too strict or too lenient; retrieval scores are still rankings; no agentic behavior, new modes or evaluation harness.
+
+## Hybrid retrieval
+
+Story 4.1 builds the `hybrid` mode (`rag-hybrid`) in `src/building_with_rag/retrieval/hybrid.py`. It adds a keyword route beside the semantic route over the same corpus and database. Everything after retrieval is shared with `semantic`: `QueryResult`/`RetrievedChunk`, context assembly, citations, `/v1/query`, the chat adapter, streaming and confidence. `run_pattern_events` dispatches `semantic` and `hybrid` the same way; the mode is chosen only by the model ID or `rag_options.pattern`, never automatically.
+
+**Keyword capability.** Atlas Search (a `search`-type index queried with `$search`). The setup command prints "Atlas Search available; search index type used for keyword retrieval" after proving `list_search_indexes` works on `chunks`. Without that capability it stops and reports the prerequisite; `hybrid` is then `unavailable` and `semantic` is unchanged. No `$text`, regex or client-side fallback.
+
+**Keyword field and index.** Field: `chunks.text` (the plain chunk text, not `embedding_input_text`). Index: `chunks_text_index`, type `search`, static mapping (`dynamic: false`): `text` as `string` with analyzer `lucene.standard` (no stemming, so exact terms and numbers stay literal), and `act`, `status`, `access_level` as `token` so the scope filter runs inside `$search`. Names and `keyword_index_definition()` are in `ingestion/mongodb_schema.py`.
+
+**Routes.** Both routes use the same validated scope (public base scope narrowed by `act`, `status`, `access_level`), the same candidate count per route (`max(limit, min(max(limit * 4, 20), 50))`), and resolve hits through `chunks`, `sections` and `sources` as semantic does. The semantic route is the Story 2.3 `$vectorSearch`. The keyword route is `$search` with a `compound` (`must`: `text` operator on the trimmed question over `text`; `filter`: `in` clauses from the scope), then `$limit` and `searchScore`. Keyword scores and cosine scores are on different scales and are never combined directly.
+
+**Fusion: Reciprocal Rank Fusion, equal weights.** `fused_score = sum over routes containing the chunk of 1 / (RRF_K + rank_in_route)`, with `RRF_K = 60` and 1-based ranks from each route's own order. A chunk in both routes sums both terms. Order by fused score, ties by `chunk_id`, then apply `limit`; candidates cut by the limit are listed in `omitted_candidates` (`below_limit`). RRF was chosen because it needs no tuning or score normalisation and works with two unlike scores.
+
+**Result fields.** `RetrievedChunk` gains optional `semantic_score`, `semantic_rank`, `keyword_score`, `keyword_rank`, `fused_score`, `fused_rank`. For hybrid, `score` equals `fused_score`; a route that did not return the chunk leaves its score and rank `null`, so the contributing route (both, semantic only, keyword only) is readable from the result. Semantic results keep these fields `null`. `trace` adds the keyword index, field and analyzer, `candidates_per_route`, `semantic_candidates_returned`, `keyword_candidates_returned`, `route_overlap`, `semantic_only`, `keyword_only`, per-route unresolved counts, and `fusion` (`name`, `k`, `weights`).
+
+**Outcomes** match semantic: `ok`, `no_results` (HTTP 200), `unavailable` (HTTP 503), 422. `unavailable` also covers a keyword index that is missing, incompatible or not queryable (`keyword_index_missing`, `keyword_index_incompatible`, `keyword_index_not_ready`). Hybrid never degrades silently to one route.
+
+**Commands:**
+
+```
+uv run python -m building_with_rag.ingestion.keyword_index
+uv run python -m building_with_rag.retrieval.hybrid --check
+uv run python -m building_with_rag.retrieval.hybrid "What is culpable homicide?" --limit 5
+```
+
+**Limitations:** fused scores are rankings, not proof of correctness; equal weights and `RRF_K` are judgments, not tuned; a chunk found by one route can still rank high; rank fusion ignores how strong a score was; no score threshold, so an unrelated question still returns its nearest passages. The keyword route searches `chunks.text` only, so a section number and heading (which are only in `embedding_input_text`) are not keyword-searchable; "section 302" matches only chunks whose text contains that number. The `text` operator matches any query term, and `lucene.standard` removes no stop words, so a long natural-language question can pull in weak keyword hits. A new index may take a short time to become queryable, and an M0 cluster allows only a few Atlas Search indexes.
 
 ## Out of scope
 
