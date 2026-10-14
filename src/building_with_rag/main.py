@@ -1,8 +1,10 @@
+import hmac
+import itertools
 import json
 import time
 import uuid
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -17,7 +19,7 @@ from .contracts import (
     SemanticFilters,
 )
 from .registry import BY_MODEL_ID, MODES
-from .service import run_pattern
+from .service import run_pattern, run_pattern_events
 from .settings import get_settings
 
 app = FastAPI(title="Building with RAG")
@@ -47,7 +49,7 @@ def healthz() -> dict[str, str]:
 
 @app.post("/v1/query", response_model=QueryResult)
 def query(request: QueryRequest):
-    result = run_pattern(request)
+    result = run_pattern(request, answer_generation=True)
     if result.status == "unavailable":
         return JSONResponse(status_code=503, content=result.model_dump())
     return result
@@ -69,8 +71,21 @@ def _sse(chunk_id: str, created: int, model: str, delta: dict, finish: str | Non
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def _authorized(authorization: str | None) -> bool:
+    """CAPSTONE_API_KEY gates chat only when it is set; an empty key leaves chat open."""
+    expected = get_settings().capstone_api_key
+    if not expected:
+        return True
+    supplied = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        supplied = authorization[7:].strip()
+    return hmac.compare_digest(supplied.encode(), expected.encode())
+
+
 @app.post("/v1/chat/completions")
-def chat_completions(request: ChatCompletionRequest):
+def chat_completions(request: ChatCompletionRequest, authorization: str | None = Header(None)):
+    if not _authorized(authorization):
+        return _openai_error(401, "Invalid or missing API key.", "invalid_api_key")
     mode = BY_MODEL_ID.get(request.model)
     if mode is None:
         return _openai_error(404, f"The model '{request.model}' does not exist.", "model_not_found")
@@ -92,11 +107,14 @@ def chat_completions(request: ChatCompletionRequest):
         required_acts=opts.required_acts if opts else None,
         chapter=opts.chapter if opts else None,
     )
-    text = run_pattern(query_request).message
+    # The same operation as /v1/query. Retrieval and context assembly finish inside it before the
+    # first text event; only answer writing is streamed.
+    events = run_pattern_events(query_request, answer_generation=True, stream=request.stream)
 
     chat_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     if not request.stream:
+        text = "".join(value for kind, value in events if kind == "text")
         return {
             "id": chat_id,
             "object": "chat.completion",
@@ -112,9 +130,19 @@ def chat_completions(request: ChatCompletionRequest):
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
+    first = next(events, None)  # runs retrieval and context assembly before the stream opens
+
     def frames():
         yield _sse(chat_id, created, request.model, {"role": "assistant", "content": ""}, None)
-        yield _sse(chat_id, created, request.model, {"content": text}, None)
+        try:
+            pending = [first] if first else []
+            for kind, value in itertools.chain(pending, events):
+                if kind == "text" and value:
+                    yield _sse(chat_id, created, request.model, {"content": value}, None)
+        except Exception:  # noqa: BLE001
+            # Never leave the stream open or leak details: say so, then close normally.
+            note = "\n\n**ERROR — the answer stream stopped unexpectedly; the text above is incomplete.**"
+            yield _sse(chat_id, created, request.model, {"content": note}, None)
         yield _sse(chat_id, created, request.model, {}, "stop")
         yield "data: [DONE]\n\n"
 

@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 
+from building_with_rag.contracts import QueryResult
 from building_with_rag.main import app
+from building_with_rag.retrieval import semantic
 
 client = TestClient(app)
 MODELS = [
@@ -28,14 +30,18 @@ def test_models():
     assert [m["id"] for m in client.get("/v1/models").json()["data"]] == MODELS
 
 
-def test_chat_json_and_sse():
+def test_chat_json_and_sse(monkeypatch):
+    def no_results(request):
+        return QueryResult(pattern="semantic", status="no_results", message="nothing matched")
+
+    monkeypatch.setattr(semantic, "retrieve", no_results)
     body = {
         "model": "rag-semantic",
         "messages": [{"role": "user", "content": "hi"}],
         "rag_options": {"pattern": "semantic", "limit": 5},
     }
     r = client.post("/v1/chat/completions", json=body)
-    assert "not implemented" in r.json()["choices"][0]["message"]["content"]
+    assert "not give enough evidence" in r.json()["choices"][0]["message"]["content"]
     s = client.post("/v1/chat/completions", json={**body, "stream": True})
     assert s.text.rstrip().endswith("data: [DONE]")
 

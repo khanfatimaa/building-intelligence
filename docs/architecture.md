@@ -36,9 +36,9 @@ Later stories reuse these names and choices. They do not rename them or add prov
 
 - **Endpoints:** `GET /healthz`, `POST /v1/query`, `GET /v1/models`, `POST /v1/chat/completions`.
 - **Contracts** (request, result, generation, OpenAI, MongoDB schema) live in this project. Later stories extend them additively and never replace them with simplified alternatives. Key names: `QueryRequest`, `QueryResult`, `RetrievedChunk`, `GenerationResult`, `SubquestionEvidence`, `StructuredSignals`, `ChatCompletionRequest`.
-- **Single path:** `/v1/chat/completions` maps the selected model to the same `QueryRequest` and `run_pattern` as `/v1/query`. The server sets the demo caller and `generate_answer`.
-- **Diagnostics:** `/v1/query` owns `QueryResult` diagnostics. Open WebUI receives only normal answer text derived from the same result.
-- **Answer rendering:** later stories show final confidence, sources, and low-confidence warnings as clearly labelled text after the answer, while the full `GenerationResult` stays in `QueryResult.generation`.
+- **Single path:** `/v1/chat/completions` maps the selected model to the same `QueryRequest` and `run_pattern` as `/v1/query`. The server sets the demo caller and `generate_answer`, and chat and `/v1/query` share one generation/validation operation per request (Story 3.2).
+- **Diagnostics:** `/v1/query` owns `QueryResult` diagnostics. Open WebUI receives only readable text (draft, confidence, sources) derived from the same operation and result.
+- **Answer rendering:** Story 3.2 shows streamed drafts labelled `DRAFT`, then final confidence, sources, and low-confidence warnings as clearly labelled text, while the full `GenerationResult` stays in `QueryResult.generation`.
 - **Startup:** the app starts with no database or model credentials. `GET /healthz` is safe and returns no settings.
 
 ## Document ingestion
@@ -96,7 +96,7 @@ Story 2.3 builds the `semantic` mode (`rag-semantic`) in `src/building_with_rag/
 
 **Scope and filters:** one fixed local demo caller (`WEBUI_DEMO_CALLER_ID`) and the `public` access level; no multi-user authorization. `SemanticFilters` accepts only `act`, `status` and `access_level`, each a non-empty list of short plain tokens. Unknown fields, operators and MongoDB-shaped values are rejected. Filters only narrow the public scope, and are part of the `$vectorSearch` stage. An empty scope (for example `access_level=["restricted"]`) is `no_results` without a Voyage or MongoDB search call. `chapter` and `required_acts` are ignored by this mode.
 
-**Caveats:** a score is a similarity ranking, never proof that a passage is correct or answers the question. No score threshold is applied, so an unrelated question still returns its nearest passages. `/v1/chat/completions` keeps its placeholder reply (it sets `generate_answer=true`, which skips retrieval) until answer generation.
+**Caveats:** a score is a similarity ranking, never proof that a passage is correct or answers the question. No score threshold is applied, so an unrelated question still returns its nearest passages. `/v1/chat/completions` was a placeholder until Story 3.2 (see "Streamed answers and confidence").
 
 **Diagnostic command** (compact output: statuses, ids, scores, lengths; no passage text or vectors):
 
@@ -104,6 +104,77 @@ Story 2.3 builds the `semantic` mode (`rag-semantic`) in `src/building_with_rag/
 uv run python -m building_with_rag.retrieval.semantic --check
 uv run python -m building_with_rag.retrieval.semantic "What is the punishment for murder?" --limit 3 --act BNS_2023
 ```
+
+## Grounded answer generation
+
+Story 3.1 turns the one semantic retrieval result into one non-streaming, grounded answer. Code lives in `src/building_with_rag/generation/` (`context.py`, `answer.py`).
+
+**Context boundary:**
+
+- Generation reads only the passages in `QueryResult.results` from the single retrieval call. It never re-queries or re-ranks.
+- Passages stay in retrieval order. Selection is bounded by named constants in `context.py` (`MAX_PASSAGES`, `MAX_CONTEXT_CHARS`); a passage is never cut. The first passage that does not fit, and every one after it, is left out.
+- Each kept passage gets a label (`E1`, `E2`, ...) tied to its `chunk_id`, act-qualified `section_id`, act, `section_label`, heading, and source details (`source_pdf`, `page_start`, `page_end`, `source_id`). This label map resolves citations; it is never rebuilt from model text.
+- `GenerationResult.trace` records passages retrieved and kept, character count, and the omitted `chunk_id`s with the reason (`passage_limit` or `character_budget`). `context_outcome` is `ok`, `truncated` or `no_evidence`. With no passages the model is not called.
+
+**Answer boundary:**
+
+- Settings: `GENERATION_API_BASE_URL`, `GENERATION_API_KEY`, `GENERATION_MODEL_NAME`. One non-streaming `POST {base}/chat/completions` (standard OpenAI chat-completions body, bearer key) through `httpx`, with a bounded timeout and no retry loop. `provider` is `openai-compatible`; `model` is what the proxy reports, else the configured name.
+- The system prompt treats passages as untrusted evidence, forbids outside knowledge and guessing, requires every claim to cite supplied labels, and forbids statements about current force or applicability beyond the supplied documents, and legal advice. The model returns one JSON object (a single code fence is tolerated; nothing else is repaired).
+- Outcomes (generation never changes the retrieval `status`; with `ok` or `no_results` the HTTP status is 200 and `generation` is filled):
+
+| `generation.outcome` | When | `answer` |
+|---|---|---|
+| `answered` | valid answer, at least one claim, every claim cites supplied labels | text |
+| `insufficient_evidence` | model says evidence is missing, unsupported or conflicting; or nothing retrieved | `null` |
+| `unavailable` | generation settings empty, timeout, connection or HTTP error | `null` |
+| `malformed` | not parseable or fails validation (including an unknown label) | `null` |
+
+- `trace["reason"]` names the cause (`missing_generation_settings: GENERATION_API_KEY`, `timeout`, `unknown_label`, ...). No key, base URL, header or raw provider error is put in a response, trace or log. The raw model text is never used as an answer.
+- `citations` (one per distinct cited label) and `supporting_passages` come only from the label map and use act-qualified wording such as "BNS section 103". Retrieved text is untrusted evidence, and the answer makes no claim about current legal applicability beyond the supplied documents.
+
+**Where it lives:** `POST /v1/query` with `pattern="semantic"` and `generate_answer=true` (`run_pattern(..., answer_generation=True)`). `/v1/chat/completions` joined this path in Story 3.2 (see "Streamed answers and confidence"). Diagnostic command (compact output; no passage text, vectors or keys; exits non-zero when retrieval is `unavailable`):
+
+```
+uv run python -m building_with_rag.generation.answer "What is the punishment for murder under the BNS?" --limit 5
+```
+
+**Limitations:** a valid citation shows the model pointed at a supplied passage, not that the passage truly supports the claim. Retrieval scores are still rankings, so an unrelated question still retrieves nearest passages and relies on the model to say insufficient evidence. No routing or follow-up memory; streaming and confidence arrive in Story 3.2.
+
+## Streamed answers and confidence
+
+Story 3.2 connects `/v1/chat/completions` (and so Open WebUI) to the Story 3.1 generation. Code: `generation/answer.py` (`generate_events`, `call_model_stream`), `service.py` (`run_pattern_events`, `run_pattern`) and the chat adapter in `main.py`.
+
+**One operation.** `/v1/query` and chat both go through `run_pattern_events`: semantic retrieval once, context assembly, then one generation/validation operation. It yields text events and ends with the final `QueryResult` (with its nested `GenerationResult`). `run_pattern` returns only that final result; chat renders the same text events. For one request exactly one operation runs, so the streamed text and the returned result describe the same LLM run. `stream: false` chat returns the same text joined into one message. `/v1/query` stays the richer view and uses the non-streaming model call; streamed chat uses the provider's streaming call (`"stream": true`, same prompt, attempt loop, checks and result building).
+
+**What is streamed.** Only answer writing. Retrieval and context assembly finish before the first chunk. The model still returns the Story 3.1 JSON object (`outcome` first, `answer` second); a display-only extractor decodes the `answer` string as it arrives, and the complete text is always parsed and checked afterwards. SSE is standard: a role chunk, `delta.content` chunks, a `finish_reason: "stop"` chunk, then `data: [DONE]`. If the provider fails after text began, a final line `UNAVAILABLE — the text above is an incomplete draft, not a final answer.` is sent and the stream is still closed. A retrieval failure or empty result is sent as one readable message.
+
+**Attempts and confidence.** After each attempt the text is checked; `MAX_ATTEMPTS = 2` (one retry, which lists the failed checks for the model). `GenerationResult` fields:
+
+| Field | Meaning |
+|---|---|
+| `confidence` | `HIGH_CONFIDENCE` (0.9) when an attempt passed every check; `LOW_CONFIDENCE` (0.2) when answer text was judged and the last attempt failed; `null` when no answer text could be judged. A coarse label, not a probability. |
+| `attempts` | attempts made (at most 2) |
+| `issues` | every failed check of every attempt, in plain language (`attempt 1: claim 2 cites E9, which was not supplied`) |
+| `draft_answer` | the last judged but unvalidated answer text; only when the final check failed |
+| `low_confidence_reason` | short reason when the final check failed |
+
+A validated answer is `outcome="answered"`. A draft that still fails after the last attempt is `outcome="malformed"` with `answer=null`, `draft_answer` set, low confidence, and no citations or supporting passages (nothing is presented as validated). Text that cannot be judged (not JSON, no answer string) has no confidence and reports the real failure; provider failures are `unavailable`; the model's own "insufficient evidence" is unchanged. `trace["attempt_log"]` keeps, per attempt, the failed checks and the labels the model cited exactly as given, including invalid ones; nothing is stripped.
+
+**Checks** (deterministic, no second LLM call): every claim cites at least one label and every label was supplied; each claim's key words mostly appear in its cited passages (`SUPPORT_MIN_OVERLAP`); numbers in a claim appear in the cited evidence; every act-qualified section the answer mentions ("BNS section 103") is among the supplied passages. These are weak heuristics. A validated answer means the checks passed, not that the law is correctly stated or applies to anyone.
+
+**Open WebUI display** (text only, built from the same events):
+
+- Each attempt starts with `DRAFT — checking evidence`, because Open WebUI cannot retract text already streamed.
+- A failed check with a retry coming shows `Check failed: ... Retrying once (attempt 2 of 2)`, then the next draft.
+- A passing attempt closes with `Checks passed. Confidence: high.`, a `Sources:` list (act-qualified section, PDF and pages), and the attempts and failed-check counts.
+- A failed final check closes with `DRAFT — low confidence, not the final answer.`, the reason, the failed checks and the draft's cited sources marked unverified.
+- Insufficient evidence, unavailable and unusable-output cases show their own distinct messages.
+
+**Authentication.** When `CAPSTONE_API_KEY` is set, `/v1/chat/completions` requires `Authorization: Bearer <CAPSTONE_API_KEY>` and answers 401 (`invalid_api_key`) before any retrieval or model call. When it is empty chat stays open. `/healthz`, `/v1/models` and `/v1/query` are unchanged. The key is never logged or returned. Whether the trainer's Pipe sends this header is confirmed in Open WebUI, not by the offline tests.
+
+**Using Open WebUI.** Start the API (`uv run uvicorn building_with_rag.main:app --port 8000`), open `http://127.0.0.1:8080`, select **Building with RAG**, choose **semantic** in the RAG-options chip, and ask a question. Watch for the draft label, any retry line, and the closing confidence and sources block. Do not change the bundle, admin panel or Functions. Other modes still reply that they are not implemented.
+
+**Limitations:** a draft is visible before it is validated and cannot be retracted; the lexical support check can be too strict or too lenient; retrieval scores are still rankings; no agentic behavior, new modes or evaluation harness.
 
 ## Out of scope
 
