@@ -60,6 +60,11 @@ def _act_code(question: str) -> tuple[str | None, bool]:
     return ("BNS" if bns else "IPC" if ipc else None), False
 
 
+def detect_act(text: str) -> tuple[str | None, bool]:
+    """(`BNS`/`IPC` when exactly one act is named else None, whether both acts are named)."""
+    return _act_code(text)
+
+
 def _section_tokens(question: str) -> list[str]:
     tokens: list[str] = []
     for match in _AFTER_KEYWORD.finditer(question):

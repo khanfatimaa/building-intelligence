@@ -172,7 +172,7 @@ A validated answer is `outcome="answered"`. A draft that still fails after the l
 
 **Authentication.** When `CAPSTONE_API_KEY` is set, `/v1/chat/completions` requires `Authorization: Bearer <CAPSTONE_API_KEY>` and answers 401 (`invalid_api_key`) before any retrieval or model call. When it is empty chat stays open. `/healthz`, `/v1/models` and `/v1/query` are unchanged. The key is never logged or returned. Whether the trainer's Pipe sends this header is confirmed in Open WebUI, not by the offline tests.
 
-**Using Open WebUI.** Start the API (`uv run uvicorn building_with_rag.main:app --port 8000`), open `http://127.0.0.1:8080`, select **Building with RAG**, choose **semantic** in the RAG-options chip, and ask a question. Watch for the draft label, any retry line, and the closing confidence and sources block. Do not change the bundle, admin panel or Functions. Choose **hybrid** for Story 4.1's hybrid mode, **hybrid-reranked** for Story 4.2, or **structured** for Story 5.1's exact lookup; the remaining modes (`decomposition`, `hyde`) still reply that they are not implemented.
+**Using Open WebUI.** Start the API (`uv run uvicorn building_with_rag.main:app --port 8000`), open `http://127.0.0.1:8080`, select **Building with RAG**, choose **semantic** in the RAG-options chip, and ask a question. Watch for the draft label, any retry line, and the closing confidence and sources block. Do not change the bundle, admin panel or Functions. Choose **hybrid** for Story 4.1's hybrid mode, **hybrid-reranked** for Story 4.2, or **structured** for Story 5.1's exact lookup; choose **decomposition** or **hyde** for Story 5.2's modes. All six modes are real.
 
 **Limitations:** a draft is visible before it is validated and cannot be retracted; the lexical support check can be too strict or too lenient; retrieval scores are still rankings; no agentic behavior, new modes or evaluation harness.
 
@@ -261,6 +261,42 @@ uv run python -m building_with_rag.retrieval.structured "What does BNS section 1
 ```
 
 **Limitations:** the rules match only the listed phrasings, so other wording gets a recommendation; no lettered sections, ranges or multi-section lookups; `filter` and `aggregation` are classified but not executed; sections the corpus lacks are `not_found`; no automatic routing, so the user chooses the mode.
+
+## Query decomposition and HyDE
+
+Story 5.2 builds the last two modes in `src/building_with_rag/retrieval/decomposition.py` (`rag-decomposition`) and `retrieval/hyde.py` (`rag-hyde`). Both are small retrieval extensions, not agents, not automatic routing and not graph construction. `run_pattern_events` dispatches them through the same single path as the other modes; the mode is chosen only by the model ID, `rag_options.pattern` or `pattern`. They use only the existing settings (`MONGODB_URI`, `VOYAGE_API_KEY` with `voyage-3.5`, and `GENERATION_API_BASE_URL`, `GENERATION_API_KEY`, `GENERATION_MODEL_NAME`); no setting was added or renamed. Both reuse `generation.answer.call_model` for their one model call (no retry, no loop) and the Story 2.3 semantic retrieval.
+
+### Query decomposition
+
+**Flow.** (1) A missing setting is `unavailable` (503, `missing_setting`, the variable named) before any call. (2) One planning call turns the question into one to three subquestions as `{"subquestions": [...]}`. (3) Code validates the plan: one to `MAX_SUBQUESTIONS` (3) non-empty, unique strings of at most `MAX_SUBQUESTION_CHARS` (300), no markup or instruction-like text, no act other than BNS or IPC, and sharing a key word with the question. Anything else is `clarify` (HTTP 200, no retrieval) with `plan_empty`, `plan_malformed`, `plan_too_many`, `plan_duplicate` or `plan_out_of_scope`. (4) Each accepted subquestion is **required** and is retrieved by semantic retrieval with limit `min(request limit, MAX_PASSAGES // number of subquestions)`; a subquestion that names exactly one act is narrowed to that act (an empty intersection with the request's filters is `no_evidence`, `scope_excludes_request`). (5) A subquestion is `evidenced` only if it has at least one real passage and one passes a lexical overlap check (`EVIDENCE_MIN_OVERLAP`, 0.4); otherwise `no_evidence` (`no_passages` or `weak_overlap`).
+
+| `status` | When | HTTP |
+|---|---|---|
+| `ok` | every subquestion `evidenced` | 200 |
+| `partial_answer` | some `evidenced`, some `no_evidence` | 200 |
+| `clarify` | plan rejected, or no subquestion `evidenced` | 200 |
+| `unavailable` | missing setting, planner or retrieval failure | 503 |
+
+**Result fields.** `QueryResult.subquestions` (`SubquestionEvidence`: `subquestion`, `status`, `results`, `reason`) in plan order; `results` is the deduplicated union of all real passages (kept for inspection even from a `no_evidence` step). `trace["decomposition"]` has the planner model, accepted subquestions, `rejected_reason`, per-step status, reason, passage count and chunk ids (no text), `evidenced_count`, `required_count` and `reason` (`partial_evidence` or `no_subquestion_evidence`). The reason is kept there because the shared generation step overwrites the top-level `trace["reason"]`.
+
+**Answer boundary.** Generation runs only with `generate_answer=true` and status `ok`, through the existing `generate_events` over `QueryResult.results` (one leading text event lists the subquestions and their evidence). `partial_answer`, `clarify` and `unavailable` make no model call; the `message` lists each subquestion as evidenced (with act-qualified sections) or missing and says no complete comparison is given. Labels, citations, confidence and Open WebUI streaming are unchanged.
+
+### HyDE
+
+**Flow.** (1) An empty filter scope is `no_results` with no call; a missing setting is `unavailable` (503). (2) One call writes a hypothetical retrieval text as `{"hypothetical_text": "..."}`; it must be a non-empty string of at most `MAX_HYPOTHETICAL_CHARS` (1,200), not markup and not an echo of the question. Empty or malformed text is `hyde_unavailable` (HTTP 200, empty `results` and candidate lists, `hypothetical_empty` or `hypothetical_malformed`); the mode never falls back to a direct-only result. (3) Two real retrievals over the same scope and index: the question (`hyde_direct_candidates`) and the hypothetical text embedded with the existing `embed_query` (`hyde_query_candidates`). (4) `results` interleaves the two lists by rank (direct 1, hypothetical 1, ...), skips duplicate `chunk_id`s and is cut to the request limit. `trace["hyde"]` records counts, overlap, `direct_only`, `hypothetical_only`, per-passage provenance and the hypothetical text length.
+
+**Containment.** The hypothetical text appears only in `hyde_hypothetical_text_debug` of the `/v1/query` response. It is not in the message, trace, context, any prompt to the answer generator, citations, sources or Open WebUI text, and it is never a filter or predicate. Statuses: `ok`, `no_results`, `hyde_unavailable` (all 200) and `unavailable` (503). Generation runs only for `ok`, over `QueryResult.results` and the original question.
+
+**Commands:**
+
+```
+uv run python -m building_with_rag.retrieval.decomposition "Compare the punishment for murder under the BNS with the punishment for murder under the IPC." --limit 5
+uv run python -m building_with_rag.retrieval.hyde "What is the offence of pretending to be a government official?" --limit 5
+```
+
+Both print statuses, counts, ids, act and text lengths only (HyDE prints the hypothetical text's length and a presence flag, never the text) and exit non-zero for `unavailable`.
+
+**Limitations:** the decomposition evidence rule is a weak lexical floor over a search with no score threshold, so `evidenced` is not proof a passage answers the subquestion; the plan and the hypothetical text come from one model call that can be wrong or biased by the question; a `partial_answer` is an evidence report, not a synthesized answer; HyDE can pull in plausible but wrong passages, embeds the text with the existing query-type embedding, and adds one model call and a second embedding call (decomposition up to three), so latency, cost and Voyage rate-limit pressure go up; at most three subquestions; no memory or follow-up; the user chooses the mode; both depend on the generation proxy. HyDE's benefit on a vocabulary-mismatch question is an observation to record after running it, not a guarantee.
 
 ## Out of scope
 

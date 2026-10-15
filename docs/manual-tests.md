@@ -26,7 +26,7 @@ curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" 
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "hyde"}'
 ```
 
-`semantic` and `hybrid` are real since Stories 2.3 and 4.1, and `hybrid-reranked` since Story 4.2 (see their sections). `structured` is real since Story 5.1. The remaining modes (`decomposition`, `hyde`) each return status 200 with `"status": "not_implemented"`, the matching `pattern`, an honest message ("... mode is not implemented yet. No retrieval was run."), and empty `results`.
+`semantic` and `hybrid` are real since Stories 2.3 and 4.1, and `hybrid-reranked` since Story 4.2 (see their sections). `structured` is real since Story 5.1. `decomposition` and `hyde` are real since Story 5.2 (see its section). All six modes now run real retrieval: with the needed settings in `.env`, the two Story 1.1 curls above for `decomposition` and `hyde` return real results, or a clear `unavailable` (503) naming the missing setting, not a placeholder.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "", "pattern": "semantic"}'
@@ -216,3 +216,34 @@ curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: appl
 ```
 
 Expect SSE frames with a grounded draft, confidence and sources citing BNS section 103, ending with `data: [DONE]`.
+
+## Story 5.2 — Query Decomposition and HyDE
+
+Adds the `decomposition` mode (one compound question split into one to three required subquestions, each retrieved separately) and the `hyde` mode (a hypothetical retrieval text used only to find real passages), through the same `/v1/query` and chat path.
+
+Needs the Story 3.2 setup (`MONGODB_URI`, `VOYAGE_API_KEY`, `GENERATION_API_BASE_URL`, `GENERATION_API_KEY` in `.env`). Start the API: `uv run uvicorn building_with_rag.main:app --port 8000`. Wait about 20 seconds between commands that call Voyage. If `CAPSTONE_API_KEY` is set, add `-H "Authorization: Bearer <your CAPSTONE_API_KEY>"` to the chat commands.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "Compare the punishment for murder under the BNS with the punishment for murder under the IPC.", "pattern": "decomposition"}'
+```
+
+Expect HTTP 200, `"pattern": "decomposition"`, `"status": "ok"`, one to three `subquestions` each with `status` `evidenced` and its own `results`, top-level `results` as their deduplicated union, and `trace.decomposition` showing the steps and `evidenced_count`.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "Compare the punishment for murder under the BNS with the punishment for murder under the Motor Vehicles Act.", "pattern": "decomposition"}'
+```
+
+Expect HTTP 200 and `"status": "clarify"` (an out-of-scope subquestion, reason `plan_out_of_scope`) or `"partial_answer"` naming the subquestion without evidence; either way no complete comparison and no generated answer. With a generation or Voyage setting blank, a normal question returns HTTP 503, `"status": "unavailable"`, `trace.reason` `missing_setting` and the variable named.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the offence of pretending to be a government official?", "pattern": "hyde"}'
+```
+
+Expect HTTP 200, `"pattern": "hyde"`, `"status": "ok"`, real passages in `hyde_direct_candidates`, `hyde_query_candidates` and the deduplicated `results`, and the hypothetical text only in `hyde_hypothetical_text_debug` (a retrieval aid, never evidence). If the model returns no usable text the status is `hyde_unavailable` with empty `results`.
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "rag-decomposition", "stream": true, "messages": [{"role": "user", "content": "Compare the punishment for murder under the BNS with the punishment for murder under the IPC."}]}'
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "rag-hyde", "stream": true, "messages": [{"role": "user", "content": "What is the offence of pretending to be a government official?"}]}'
+```
+
+Expect HTTP 200 SSE chunks like Story 3.2 (draft label, confidence and sources block, a `stop` chunk), ending with `data: [DONE]`. Decomposition first lists its subquestions and their evidence; for `clarify`, `partial_answer` or `hyde_unavailable` the reply is that mode's message instead of a draft.

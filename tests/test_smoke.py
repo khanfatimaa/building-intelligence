@@ -19,11 +19,24 @@ def test_healthz():
     assert client.get("/healthz").json() == {"status": "ok"}
 
 
-def test_query_placeholder():
-    r = client.post("/v1/query", json={"question": "What is theft?", "pattern": "decomposition"})
-    assert r.status_code == 200
-    assert r.json()["status"] == "not_implemented"
-    assert r.json()["results"] == []
+def test_every_registered_pattern_dispatches_to_a_retrieval(monkeypatch):
+    from building_with_rag.retrieval import decomposition, hybrid, hyde, rerank, structured
+
+    modules = {
+        "semantic": semantic, "hybrid": hybrid, "hybrid-reranked": rerank,
+        "structured": structured, "decomposition": decomposition, "hyde": hyde,
+    }  # fmt: skip
+    for pattern, module in modules.items():
+        monkeypatch.setattr(
+            module,
+            "retrieve",
+            lambda request, pattern=pattern: QueryResult(
+                pattern=pattern, status="ok", message="faked retrieval"
+            ),
+        )
+        r = client.post("/v1/query", json={"question": "What is theft?", "pattern": pattern})
+        assert r.status_code == 200
+        assert (r.json()["pattern"], r.json()["status"]) == (pattern, "ok")
 
 
 def test_models():

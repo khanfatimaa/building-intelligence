@@ -184,12 +184,17 @@ def test_timeout_is_unavailable(monkeypatch):
 # --- routing ------------------------------------------------------------------------------------
 
 
-def test_other_modes_keep_the_placeholder_in_chat(monkeypatch):
-    monkeypatch.setattr(semantic, "retrieve", never_called)
+def test_decomposition_chat_shows_its_message_without_generation(monkeypatch):
+    from building_with_rag.retrieval import decomposition
+
+    def clarify(request):
+        return QueryResult(pattern="decomposition", status="clarify", message="Please restate it.")
+
+    monkeypatch.setattr(decomposition, "retrieve", clarify)
     monkeypatch.setattr(answer, "generate_events", never_called)
     body = {"model": "rag-decomposition", "messages": [{"role": "user", "content": "What is theft?"}]}
     text = TestClient(app).post("/v1/chat/completions", json=body).json()["choices"][0]
-    assert "not implemented" in text["message"]["content"]
+    assert text["message"]["content"] == "Please restate it."
 
 
 def test_query_without_generate_answer_has_no_generation(monkeypatch):
