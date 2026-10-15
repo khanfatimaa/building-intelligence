@@ -8,23 +8,27 @@ def run_pattern_events(
 ) -> Iterator[tuple[str, object]]:
     """The one operation behind /v1/query and /v1/chat/completions.
 
-    Yields ("text", str) display events and ends with ("final", QueryResult). Semantic, hybrid or hybrid-reranked retrieval
+    Yields ("text", str) display events and ends with ("final", QueryResult). Semantic, hybrid, hybrid-reranked or structured retrieval
     runs once; for requests that ask for a generated answer (`answer_generation` on) that same
     result goes to one generation/validation operation, whose text events and final result
     describe the same run. `stream` only chooses the provider's streaming call for answer writing.
     """
-    if request.pattern in ("semantic", "hybrid", "hybrid-reranked") and (
+    if request.pattern in ("semantic", "hybrid", "hybrid-reranked", "structured") and (
         not request.generate_answer or answer_generation
     ):
         if request.pattern == "hybrid-reranked":
             from .retrieval.rerank import retrieve
         elif request.pattern == "hybrid":
             from .retrieval.hybrid import retrieve
+        elif request.pattern == "structured":
+            from .retrieval.structured import retrieve
         else:
             from .retrieval.semantic import retrieve
 
         result = retrieve(request)
-        if request.generate_answer and result.status in ("ok", "no_results"):
+        # Structured not_found, clarification and recommendation results are shown as their message.
+        generating = ("ok",) if request.pattern == "structured" else ("ok", "no_results")
+        if request.generate_answer and result.status in generating:
             from .generation.answer import generate_events
 
             yield from generate_events(result, request.question, stream=stream)

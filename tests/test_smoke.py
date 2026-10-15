@@ -20,7 +20,7 @@ def test_healthz():
 
 
 def test_query_placeholder():
-    r = client.post("/v1/query", json={"question": "What is theft?", "pattern": "structured"})
+    r = client.post("/v1/query", json={"question": "What is theft?", "pattern": "decomposition"})
     assert r.status_code == 200
     assert r.json()["status"] == "not_implemented"
     assert r.json()["results"] == []

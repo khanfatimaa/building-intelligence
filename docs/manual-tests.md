@@ -26,7 +26,7 @@ curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" 
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "hyde"}'
 ```
 
-`semantic` and `hybrid` are real since Stories 2.3 and 4.1, and `hybrid-reranked` since Story 4.2 (see their sections). The remaining modes (`structured`, `decomposition`, `hyde`) each return status 200 with `"status": "not_implemented"`, the matching `pattern`, an honest message ("... mode is not implemented yet. No retrieval was run."), and empty `results`.
+`semantic` and `hybrid` are real since Stories 2.3 and 4.1, and `hybrid-reranked` since Story 4.2 (see their sections). `structured` is real since Story 5.1. The remaining modes (`decomposition`, `hyde`) each return status 200 with `"status": "not_implemented"`, the matching `pattern`, an honest message ("... mode is not implemented yet. No retrieval was run."), and empty `results`.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "", "pattern": "semantic"}'
@@ -193,3 +193,26 @@ curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: appl
 ```
 
 Expect HTTP 200 SSE chunks like Story 3.2 (draft label, confidence and sources block, a `stop` chunk) citing only the final selected passages, ending with `data: [DONE]`.
+
+## Story 5.1 — Structured Exact Retrieval
+
+Adds the `structured` mode: a read-only exact lookup of one BNS or IPC section chosen by a rule-based classifier. Needs `MONGODB_URI` in `.env`; start the API first.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What does BNS section 103 say?", "pattern": "structured"}'
+```
+
+Expect HTTP 200, `"status": "ok"`, `"pattern": "structured"`, results with `section_id` `bns:103` and its stored `status` in `source`, and `trace.predicate` showing `BNS_2023` and 103.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What does section 103 say?", "pattern": "structured"}'
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What does IPC section 600 say?", "pattern": "structured"}'
+```
+
+Expect HTTP 200 for both: the first is `clarification_needed` (`missing_act`, empty `results`, `database_called` false); the second is `not_found` (`no_matching_section`, "not in the loaded corpus").
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "rag-structured", "stream": true, "messages": [{"role": "user", "content": "What does BNS section 103 say?"}]}'
+```
+
+Expect SSE frames with a grounded draft, confidence and sources citing BNS section 103, ending with `data: [DONE]`.

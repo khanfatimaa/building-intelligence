@@ -172,7 +172,7 @@ A validated answer is `outcome="answered"`. A draft that still fails after the l
 
 **Authentication.** When `CAPSTONE_API_KEY` is set, `/v1/chat/completions` requires `Authorization: Bearer <CAPSTONE_API_KEY>` and answers 401 (`invalid_api_key`) before any retrieval or model call. When it is empty chat stays open. `/healthz`, `/v1/models` and `/v1/query` are unchanged. The key is never logged or returned. Whether the trainer's Pipe sends this header is confirmed in Open WebUI, not by the offline tests.
 
-**Using Open WebUI.** Start the API (`uv run uvicorn building_with_rag.main:app --port 8000`), open `http://127.0.0.1:8080`, select **Building with RAG**, choose **semantic** in the RAG-options chip, and ask a question. Watch for the draft label, any retry line, and the closing confidence and sources block. Do not change the bundle, admin panel or Functions. Choose **hybrid** for Story 4.1's hybrid mode; the remaining modes still reply that they are not implemented.
+**Using Open WebUI.** Start the API (`uv run uvicorn building_with_rag.main:app --port 8000`), open `http://127.0.0.1:8080`, select **Building with RAG**, choose **semantic** in the RAG-options chip, and ask a question. Watch for the draft label, any retry line, and the closing confidence and sources block. Do not change the bundle, admin panel or Functions. Choose **hybrid** for Story 4.1's hybrid mode, **hybrid-reranked** for Story 4.2, or **structured** for Story 5.1's exact lookup; the remaining modes (`decomposition`, `hyde`) still reply that they are not implemented.
 
 **Limitations:** a draft is visible before it is validated and cannot be retracted; the lexical support check can be too strict or too lenient; retrieval scores are still rankings; no agentic behavior, new modes or evaluation harness.
 
@@ -228,6 +228,39 @@ It prints the counts and limits, the before and after tables, the selected evide
 **Comparison finding:** pending. The lightweight hybrid versus hybrid-reranked comparison on one question (Story 4.2, direct check 6) has not been run; record its observation here once it is.
 
 **Limitations:** re-rank scores are one model's relevance ranking, not proof that a passage answers the question. The re-ranker sees only the sent candidates, so a relevant passage hybrid ranked below `RERANK_SEND_LIMIT` (or below the candidate limit) is never seen. Re-ranking adds one external call, so latency and cost go up and the mode depends on a third service. Passage text is sent to that provider. No score threshold is applied, so an unrelated question still returns its best-ranked passages. There is no caching, and the bounds are untuned defaults. Only chunk `text` is sent; section numbers and headings are not in it, as noted for hybrid.
+
+## Structured exact retrieval
+
+Story 5.1 builds the `structured` mode (`rag-structured`) in `src/building_with_rag/retrieval/signals.py` (classifier) and `retrieval/structured.py` (lookup). It is a read-only exact lookup of one section, not an LLM extraction step, not a replacement for semantic search and not an automatic router. `run_pattern_events` dispatches it through the same path as the other retrieval modes; the mode is chosen only by the model ID, `rag_options.pattern` or `pattern: "structured"`.
+
+**Exact-input contract.**
+
+- The rule-based classifier (fixed regular expressions, no model, network or database) is the only reader of the question. It emits `StructuredSignals` with intent `exact_lookup` only for **exactly one** act (`BNS` or `IPC`) and **exactly one** plain integer section from 1 to 999, in phrasings such as "BNS section 103", "section 302 of the IPC", "IPC s. 302" or "BNS 103". `filter` and `aggregation` are recognised from a few fixed phrases but are not executed.
+- The MongoDB predicate is built only from validated values in a fixed shape: `act` (`BNS_2023` or `IPC_1860`), integer `section_number`, `access_level` `public`, plus `status` (`$in`) only when `filters.status` is given and `chapter` only when `QueryRequest.chapter` is a valid Roman numeral (upper-cased). `filters.act` and `filters.access_level` can only narrow; an empty scope never queries. Raw question text never becomes a predicate and `required_acts` is ignored.
+- One read-only `find` on `sections`, then `chunks` (by `section_id`) and `sources` by id. No write, aggregation, regex or other query is ever sent. No Voyage, re-rank, vector or search index is used.
+- Results are `RetrievedChunk` records (one per stored chunk of the section, at most `limit`) with the same `source` fields as semantic, plus `source_status_version`; `score` is `null`.
+
+**Outcomes.**
+
+| `status` | When | HTTP | `trace["reason"]` |
+|---|---|---|---|
+| `ok` | exact record found | 200 | none |
+| `not_found` | valid request, no matching record or empty scope | 200 | `no_matching_section`, `scope_excludes_request` |
+| `clarification_needed` | missing or both acts, missing, several, ranged, lettered or out-of-range section, invalid chapter | 200 | `missing_act`, `ambiguous_act`, `missing_section`, `multiple_sections`, `lettered_section_unsupported`, `section_out_of_range`, `invalid_chapter` |
+| `recommendation` | `filter` or `aggregation` phrase, or not a structured request | 200 | `intent_not_executed`, `not_structured_request` |
+| `unavailable` | `MONGODB_URI` empty, MongoDB failure, section without chunks | 503 | `missing_setting`, `database_error`, `section_without_chunks` |
+
+`clarification_needed` and `recommendation` make no database call and return empty `results`; the message only suggests `semantic` or `hybrid`, the application never switches mode. `trace` holds `classifier` (name, signals, reason, rule), `predicate`, `database_called`, `section_id`, `chunks_total` and `chunks_returned`.
+
+**Answer boundary.** The mode never generates by itself. With `generate_answer=false` (the `/v1/query` default) the result is direct inspection in diagnostics. With `generate_answer=true` and status `ok`, the same result goes through the existing context assembly and grounded-answer path (labels, citations, confidence, DRAFT/sources rendering, Open WebUI streaming unchanged). For every other status no model call is made and the result `message` is the visible text. Status and `source_status_version` are source metadata exactly as stored; nothing claims the section is currently applicable law.
+
+**Command:**
+
+```
+uv run python -m building_with_rag.retrieval.structured "What does BNS section 103 say?"
+```
+
+**Limitations:** the rules match only the listed phrasings, so other wording gets a recommendation; no lettered sections, ranges or multi-section lookups; `filter` and `aggregation` are classified but not executed; sections the corpus lacks are `not_found`; no automatic routing, so the user chooses the mode.
 
 ## Out of scope
 
