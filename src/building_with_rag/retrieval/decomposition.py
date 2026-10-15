@@ -14,6 +14,8 @@ import argparse
 import json
 import re
 import sys
+import time
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import ValidationError
@@ -35,6 +37,7 @@ PATTERN = "decomposition"
 MAX_SUBQUESTIONS = 3
 MAX_SUBQUESTION_CHARS = 300
 EVIDENCE_MIN_OVERLAP = 0.4  # share of a subquestion's key words found in at least one passage
+STEP_DELAY_SECONDS = 20  # pause between two Voyage searches, as in Story 2.2 (free key rate limit)
 ACT_FILTER = {"BNS": "BNS_2023", "IPC": "IPC_1860"}
 
 PLANNER_PROMPT = """\
@@ -182,6 +185,7 @@ def retrieve(
     db: Any = None,
     embed: Any = None,
     call: answer.ModelCall | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> QueryResult:
     """Decomposition. Statuses: ok, partial_answer, clarify, unavailable."""
     settings = settings or get_settings()
@@ -228,6 +232,7 @@ def retrieve(
     per_step = min(request.limit, MAX_PASSAGES // len(subquestions))
     steps: list[SubquestionEvidence] = []
     step_trace: list[dict[str, Any]] = []
+    searched = False
     for number, sub in enumerate(subquestions, 1):
         filters, act, excluded = _step_filters(request, sub)
         info: dict[str, Any] = {"subquestion": sub, "act_filter": act}
@@ -236,6 +241,9 @@ def retrieve(
             info["retrieval_status"] = "skipped"
             status, reason = "no_evidence", "scope_excludes_request"
         else:
+            if searched and STEP_DELAY_SECONDS:
+                sleep(STEP_DELAY_SECONDS)  # keep a free Voyage key under its rate limit
+            searched = True
             step_request = QueryRequest(
                 question=sub,
                 pattern="semantic",

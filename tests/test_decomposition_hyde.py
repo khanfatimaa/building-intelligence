@@ -22,6 +22,11 @@ IPC_SUB = "What is the punishment for murder under the IPC?"
 HYPO = "A person who falsely claims an official post to deceive another commits an offence."
 
 
+@pytest.fixture(autouse=True)
+def no_step_delay(monkeypatch):
+    monkeypatch.setattr(decomposition, "STEP_DELAY_SECONDS", 0)
+
+
 def chunk(chunk_id: str, text: str = "Whoever commits murder shall be punished.") -> RetrievedChunk:
     act, _, number = chunk_id.partition(":")
     number = number.split("#")[0]
@@ -113,6 +118,19 @@ def test_every_step_evidenced_is_ok_with_deduplicated_union(monkeypatch):
     assert [c.chunk_id for c in result.subquestions[1].results] == ["ipc:302#0", "bns:1#0"]
     assert seen == [(BNS_SUB, ["BNS_2023"]), (IPC_SUB, ["IPC_1860"])]  # each step narrowed to its act
     assert result.trace["decomposition"]["evidenced_count"] == 2
+
+
+def test_pauses_between_searches_but_not_before_the_first(monkeypatch):
+    monkeypatch.setattr(decomposition, "STEP_DELAY_SECONDS", 20)
+    monkeypatch.setattr(semantic, "retrieve", lambda *a, **k: retrieval([chunk("bns:103#0")]))
+    pauses = []
+    decomposition.retrieve(
+        request("decomposition"),
+        settings=CONFIGURED,
+        call=calls({"subquestions": [BNS_SUB, IPC_SUB]}),
+        sleep=pauses.append,
+    )
+    assert pauses == [20]
 
 
 def test_missing_evidence_is_partial_or_clarify_not_ok(monkeypatch):

@@ -239,7 +239,7 @@ Expect HTTP 200 and `"status": "clarify"` (an out-of-scope subquestion, reason `
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the offence of pretending to be a government official?", "pattern": "hyde"}'
 ```
 
-Expect HTTP 200, `"pattern": "hyde"`, `"status": "ok"`, real passages in `hyde_direct_candidates`, `hyde_query_candidates` and the deduplicated `results`, and the hypothetical text only in `hyde_hypothetical_text_debug` (a retrieval aid, never evidence). If the model returns no usable text the status is `hyde_unavailable` with empty `results`.
+Expect HTTP 200, `"pattern": "hyde"`, `"status": "ok"`, real passages in `hyde_direct_candidates`, `hyde_query_candidates` and the deduplicated `results`, and the hypothetical text only in `hyde_hypothetical_text_debug` (a retrieval aid, never evidence). If the model returns no usable text the status is `hyde_unavailable` with empty `results`. 
 
 ```bash
 curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "rag-decomposition", "stream": true, "messages": [{"role": "user", "content": "Compare the punishment for murder under the BNS with the punishment for murder under the IPC."}]}'
