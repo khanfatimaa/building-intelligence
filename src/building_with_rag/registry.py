@@ -11,7 +11,7 @@ class Mode:
 
 MODES: tuple[Mode, ...] = tuple(
     Mode(p, f"rag-{p}")
-    for p in ("semantic", "hybrid", "hybrid-reranked", "structured", "decomposition", "hyde")
+    for p in ("semantic", "hybrid", "hybrid-reranked", "structured", "decomposition", "hyde", "agentic")
 )
 PATTERNS = tuple(m.pattern for m in MODES)
 BY_MODEL_ID = {m.model_id: m for m in MODES}

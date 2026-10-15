@@ -33,6 +33,7 @@ Later stories reuse these names and choices. They do not rename them or add prov
 | structured | rag-structured |
 | decomposition | rag-decomposition |
 | hyde | rag-hyde |
+| agentic | rag-agentic |
 
 - **Endpoints:** `GET /healthz`, `POST /v1/query`, `GET /v1/models`, `POST /v1/chat/completions`.
 - **Contracts** (request, result, generation, OpenAI, MongoDB schema) live in this project. Later stories extend them additively and never replace them with simplified alternatives. Key names: `QueryRequest`, `QueryResult`, `RetrievedChunk`, `GenerationResult`, `SubquestionEvidence`, `StructuredSignals`, `ChatCompletionRequest`.
@@ -298,6 +299,31 @@ Both print statuses, counts, ids, act and text lengths only (HyDE prints the hyp
 
 **Limitations:** the decomposition evidence rule is a weak lexical floor over a search with no score threshold, so `evidenced` is not proof a passage answers the subquestion; the plan and the hypothetical text come from one model call that can be wrong or biased by the question; a `partial_answer` is an evidence report, not a synthesized answer; HyDE can pull in plausible but wrong passages, embeds the text with the existing query-type embedding, and adds one model call and a second embedding call (decomposition up to three), so latency, cost and Voyage rate-limit pressure go up; at most three subquestions; no memory or follow-up; the user chooses the mode; both depend on the generation proxy. HyDE's benefit on a vocabulary-mismatch question is an observation to record after running it, not a guarantee.
 
+## Agentic RAG
+
+Story 6.1 adds the seventh mode, `agentic` (`rag-agentic`), in `retrieval/agentic.py`. It is a deterministic, read-only controller that runs only when the user selects the mode; it never routes requests from another mode. It has no model call of its own, no planner, no dynamic tools, no writes and no retries. Its fixed allowlist is `structuredLookup` (`structured.retrieve`), `semanticRetrieve` (`semantic.retrieve`) and `hydeRetrieve` (`hyde.retrieve`).
+
+**Fixed rules.** (1) Validate before any call with the structured classifier: a bare section number, both acts, several or lettered or out-of-range sections, an invalid chapter, no words, or a filter/aggregation phrase is `clarify` (the trace keeps only the validation reason, never the question); an empty effective scope is `partial_result` with no call. (2) An act-qualified section request calls `structuredLookup` once; a missing record is `clarify`, never a guess or a semantic fallback. (3) Otherwise, if the question matches the small prepared vocabulary table (lay phrase to statutory terms, for example "pretending to be a government official" to "personat" / "public servant"), `semanticRetrieve` runs once; if no usable passage contains a statutory term, `hydeRetrieve` runs once after it. (4) Any other valid question calls `semanticRetrieve` once; at least one usable real passage is adequate. A usable passage has text, a `chunk_id`, a BNS/IPC act and sits inside the request's effective scope; every returned result is inspected, and a result that breaks this is a bad tool result.
+
+**Bounds.** At most two adapter calls and one HyDE call. Every call gets the request with only `pattern` and `generate_answer` changed, so scope, limit and chapter propagate. The deadline `AGENTIC_DEADLINE_SECONDS` (default 45, clamped to 1-120; an application setting, not a provider variable) is checked before and after each call.
+
+| `status` | `trace.agentic.stop_reason` | HTTP |
+|---|---|---|
+| `ok` | `ready_for_synthesis` | 200 |
+| `partial_result` | `partial_result`, or `deadline_exceeded` / `call_budget_exhausted` with retained passages | 200 |
+| `clarify` | `clarify` | 200 |
+| `unavailable` | `tool_unavailable`, `bad_tool_result`, or deadline/budget with no passage | 503 |
+
+**Evidence boundary.** `results` holds only real passages returned by the adapters. An adapter's trace and the HyDE hypothetical text (`hyde_*` fields) are never copied, so the text appears nowhere in the response. `trace["agentic"]` records `controller`, `validation`, `path`, `calls` (adapter, status, passage and usable counts, adequacy), `call_count`, `hyde_calls`, `deadline_seconds` and `stop_reason`, with no request text. Generation runs only for `ok`, through the existing grounded-answer, citation, confidence and Open WebUI paths.
+
+**Command:**
+
+```
+uv run python -m building_with_rag.retrieval.agentic "What does BNS section 103 say?"
+```
+
+**Limitations:** the path is fixed and the user must pick the mode; the vocabulary table is tiny and covers only prepared phrasings; adequacy is a weak floor, not proof of relevance; the deadline is cooperative and cannot interrupt an in-flight adapter; HyDE adds a model call and a second embedding call and may hit the Voyage free-key rate limit (no retry); no memory, retries or controller re-ranking.
+
 ## Out of scope
 
-Multi-user authorization, a security programme, an evaluation harness, GraphRAG, agentic RAG, and broad deployment.
+Multi-user authorization, a security programme, an evaluation harness, GraphRAG, open-ended or LLM-planned agents, automatic routing, memory, retries, and broad deployment.

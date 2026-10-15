@@ -12,6 +12,7 @@ MODELS = [
     "rag-structured",
     "rag-decomposition",
     "rag-hyde",
+    "rag-agentic",
 ]
 
 
@@ -20,11 +21,12 @@ def test_healthz():
 
 
 def test_every_registered_pattern_dispatches_to_a_retrieval(monkeypatch):
-    from building_with_rag.retrieval import decomposition, hybrid, hyde, rerank, structured
+    from building_with_rag.retrieval import agentic, decomposition, hybrid, hyde, rerank, structured
 
     modules = {
         "semantic": semantic, "hybrid": hybrid, "hybrid-reranked": rerank,
         "structured": structured, "decomposition": decomposition, "hyde": hyde,
+        "agentic": agentic,
     }  # fmt: skip
     for pattern, module in modules.items():
         monkeypatch.setattr(

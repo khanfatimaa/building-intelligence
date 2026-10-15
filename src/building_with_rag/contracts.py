@@ -4,7 +4,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-Pattern = Literal["semantic", "hybrid", "hybrid-reranked", "structured", "decomposition", "hyde"]
+Pattern = Literal[
+    "semantic", "hybrid", "hybrid-reranked", "structured", "decomposition", "hyde", "agentic"
+]
 
 
 # A filter value is a short plain token: no operators, no "$", no MongoDB fragments.
@@ -115,14 +117,32 @@ class ChatMessage(BaseModel):
     content: str
 
 
+def _empty_list_to_none(value: Any) -> Any:
+    return None if isinstance(value, list) and not value else value
+
+
+class ChatFilters(SemanticFilters):
+    """Chat-only filters: the Open WebUI chip sends [] for "all", which means no filter."""
+
+    @field_validator("act", "status", "access_level", mode="before")
+    @classmethod
+    def _all_means_unfiltered(cls, value: Any) -> Any:
+        return _empty_list_to_none(value)
+
+
 class RagOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     pattern: Pattern | None = None
-    filters: SemanticFilters | None = None
+    filters: ChatFilters | None = None
     act: FilterList | None = None
     status: FilterList | None = None
     access_level: FilterList | None = None
+
+    @field_validator("act", "status", "access_level", mode="before")
+    @classmethod
+    def _all_means_unfiltered(cls, value: Any) -> Any:
+        return _empty_list_to_none(value)
     limit: int | None = Field(default=None, ge=1, le=20)
     required_acts: list[str] | None = None
     chapter: str | None = None

@@ -13,7 +13,7 @@ def run_pattern_events(
     """The one operation behind /v1/query and /v1/chat/completions.
 
     Yields ("text", str) display events and ends with ("final", QueryResult). One retrieval mode
-    (semantic, hybrid, hybrid-reranked, structured, decomposition or hyde) runs once; for
+    (semantic, hybrid, hybrid-reranked, structured, decomposition, hyde or agentic) runs once; for
     requests that ask for a generated answer (`answer_generation` on) that same result goes to
     one generation/validation operation, whose text events and final result describe the same run. `stream` only chooses the provider's streaming call for answer
     writing.
@@ -27,13 +27,15 @@ def run_pattern_events(
             from .retrieval.structured import retrieve
         elif request.pattern == "decomposition":
             from .retrieval.decomposition import retrieve
+        elif request.pattern == "agentic":
+            from .retrieval.agentic import retrieve
         elif request.pattern == "hyde":
             from .retrieval.hyde import retrieve
         else:
             from .retrieval.semantic import retrieve
 
         result = retrieve(request)
-        # Structured, decomposition and hyde generate only for `ok`; their other statuses are
+        # Structured, decomposition, hyde and agentic generate only for `ok`; their other statuses are
         # shown as the result message (no complete comparison without evidence for every step).
         generating = ("ok", "no_results") if request.pattern in OPEN_PATTERNS else ("ok",)
         if request.generate_answer and result.status in generating:

@@ -16,7 +16,7 @@ Expect `{"status":"ok"}`.
 curl http://127.0.0.1:8000/v1/models
 ```
 
-Expect a list of exactly six IDs: `rag-semantic`, `rag-hybrid`, `rag-hybrid-reranked`, `rag-structured`, `rag-decomposition`, `rag-hyde`.
+Expect a list of exactly seven IDs: `rag-semantic`, `rag-hybrid`, `rag-hybrid-reranked`, `rag-structured`, `rag-decomposition`, `rag-hyde`, `rag-agentic`.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the punishment for murder?", "pattern": "semantic"}'
@@ -247,3 +247,27 @@ curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: appl
 ```
 
 Expect HTTP 200 SSE chunks like Story 3.2 (draft label, confidence and sources block, a `stop` chunk), ending with `data: [DONE]`. Decomposition first lists its subquestions and their evidence; for `clarify`, `partial_answer` or `hyde_unavailable` the reply is that mode's message instead of a draft.
+
+## Story 6.1 — Bounded Agentic RAG
+
+Adds the `agentic` mode (`rag-agentic`): a fixed, read-only controller over `structuredLookup`, `semanticRetrieve` and `hydeRetrieve`, at most two calls, a short deadline (`AGENTIC_DEADLINE_SECONDS`, default 45). Needs the Story 5.2 setup. Wait about 20 seconds between commands that call Voyage.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What does BNS section 103 say?", "pattern": "agentic"}'
+```
+
+Expect HTTP 200, `"status": "ok"`, `trace.agentic.calls` with one `structuredLookup`, `stop_reason` `ready_for_synthesis`, BNS section 103 passages. Repeat with "What does BNS section 9999 say?": `clarify`, no semantic call.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is culpable homicide?", "pattern": "agentic"}'
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "What is the offence of pretending to be a government official?", "pattern": "agentic"}'
+curl -X POST http://127.0.0.1:8000/v1/query -H "Content-Type: application/json" -d '{"question": "section 103", "pattern": "agentic"}'
+```
+
+Expect: one `semanticRetrieve` call and `ok`; path `vocabulary_mismatch` with `semanticRetrieve` then `hydeRetrieve` only if the direct passages lack the statutory terms (`call_count` at most 2, `hyde_hypothetical_text_debug` null, no hypothetical text anywhere); `clarify` with `call_count` 0 and only the validation reason in the trace. With `AGENTIC_DEADLINE_SECONDS=1` the trace shows `deadline_exceeded`.
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "rag-agentic", "stream": true, "messages": [{"role": "user", "content": "What does BNS section 103 say?"}]}'
+```
+
+Expect SSE with a grounded draft, confidence and sources citing real passages, ending with `data: [DONE]`. `GET /v1/models` lists seven IDs; run one question per mode through `/v1/query` and chat.
